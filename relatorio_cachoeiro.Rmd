@@ -1,0 +1,821 @@
+---
+title: "Relatório Estado Presente - Cachoeiro de Itapemirim"
+author: 'Caroline de Oliveira Costa'
+date: "22-02-2025"
+output: html_document
+---
+
+```{r include=FALSE}
+library(readr)
+library(plotly)
+library(dplyr)
+library(data.table)
+library(lubridate)
+library(ggplot2)
+library(RColorBrewer)
+library(reactR)
+library(htmltools)
+library(reactable)
+library(stringr)
+library(sidrar)
+library(janitor)
+library(readxl)
+library(knitr)
+library(kableExtra)
+library(tidyverse)
+library(latex2exp)
+library(geobr)
+library(scales)
+library(sf)
+library(lwgeom)
+library(grid)
+library(patchwork)
+library(ggpubr)
+library(highcharter)
+library(viridis)
+library(purrr)
+
+pacman::p_load("Hmisc", "summarytools", "DataExplorer",  "glue", 
+               "viridisLite"
+               )
+#Paleta de cores 
+
+
+#LER E SALVAR DADOS TOTAIS BR
+dados_br_total <- c()
+for (ano in 2013:2022) {
+  
+  df <- readRDS(paste0("Bases/bases_de_dados/dados_", ano,".rds"))
+  dados_br_total <- bind_rows(df,dados_br_total)
+  
+}
+#ADICIONANDO COLUNAS EXTRAS
+#criar coluna do ano em que o obito ocorreu
+dados_br_total$DTOBITO <- ymd(dados_br_total$DTOBITO)
+dados_br_total$ANOOBITO <- year(dados_br_total$DTOBITO)
+
+#criar coluna da idade em anos completos
+dados_br_total$DTNASC  <- ymd(dados_br_total$DTNASC)  
+dados_br_total$DTOBITO  <- ymd(dados_br_total$DTOBITO)
+dados_br_total$IDADE2  <- floor(interval(start  =  dados_br_total$DTNASC , 
+                                         end = dados_br_total$DTOBITO) / years(1)) # arrendondado p baixo - anos completos
+#codigos UF
+codigosUF <- read_table("Bases/var_extras_UF.txt")
+codigosUF$codigoUF <- as.character(codigosUF$codigoUF)
+# criando a var codigosUF
+dados_br_total <- dados_br_total %>% 
+  mutate(
+    codigoUF = substr(as.character(CODMUNOCOR), 1, 2)
+  )
+dados_br_total <- inner_join(dados_br_total, codigosUF, by = "codigoUF")
+#ler codigos das cids que tem a ver com uso de psicoativos
+codigos_psic <- readLines("Bases/codigos_psic.txt")
+#Criando variável idade_unificada
+# 1. arrumando variável idade
+# Função para converter idade codificada em anos
+convert_idade_para_anos <- function(IDADE) {
+  # Verificar se o valor de IDADE é NA
+  if (is.na(IDADE)) {
+    return(NA)
+  }
+  
+  # Extrair o primeiro dígito e os dois dígitos seguintes
+  unidade <- as.numeric(substr(IDADE, 1, 1))  
+  quantidade <- as.numeric(substr(IDADE, 2, 3))
+  
+  # Se a unidade ou quantidade for NA, retornar NA
+  if (is.na(unidade) | is.na(quantidade)) {
+    return(NA)
+  }
+  
+  # Conversão para anos com base na unidade
+  if (unidade == 1) {  # Minutos
+    idade_anos <- 0  # Definir como 0 anos
+  } else if (unidade == 2) {  # Horas
+    idade_anos <- 0  # Definir como 0 anos
+  } else if (unidade == 3) {  # Meses
+    idade_anos <- 0  # Converter meses para anos em formato decimal
+  } else if (unidade == 4) {  # Anos (de 00 a 99)
+    idade_anos <- quantidade
+  } else if (unidade == 5) {  # Anos (maior que 100 anos)
+    idade_anos <- 100 + quantidade  # Adiciona 100 para representar idades acima de 100 anos
+  } else if (unidade == 9) {  # Ignorado
+    idade_anos <- NA  # Valor ignorado
+  } else {
+    idade_anos <- NA  # Tratamento para valores fora do esperado
+  }
+  
+  
+  return(idade_anos)
+}
+# Aplicando a função ao dataframe
+dados_br_total$IDADE3 <- sapply(dados_br_total$IDADE, convert_idade_para_anos)
+dados_br_total$IDADE3 <- as.integer(dados_br_total$IDADE3)
+#2. Unificando 
+#UNINDO COLUNAS A PARTIR DA CULUNA IDADE2
+dados_br_total <- dados_br_total %>%
+  mutate(
+    idade_unificada = case_when(
+      # Se um valor for negativo, ficar com o outro
+      IDADE2 < 0 & IDADE3 >= 0 ~ IDADE3,
+      IDADE3 < 0 & IDADE2 >= 0 ~ IDADE2,
+      
+      # Se um for NA e o outro não, ficar com o valor numérico
+      is.na(IDADE2) & !is.na(IDADE3) ~ IDADE3,
+      !is.na(IDADE2) & is.na(IDADE3) ~ IDADE2,
+      
+      # Se forem diferentes e nenhum for negativo ou NA, escolher IDADE2
+      IDADE2 != IDADE3 ~ IDADE2,
+      
+      # Caso contrário, manter IDADE2 (ou poderia usar IDADE3, pois são iguais)
+      TRUE ~ IDADE2
+    )
+  )
+#Excluindo colunas auxiliares:
+excluir <- c("IDADE", "IDADE2","IDADE3")
+dados_br_total <- dados_br_total[,!(names(dados_br_total)%in% excluir)]
+## Renomear nome da coluna
+dados_br_total <- dados_br_total %>% 
+  rename(IDADE2 = idade_unificada,
+  )
+#alterando raças 
+# Transformar "preto" e "parda" em "negro"
+dados_br_total <- dados_br_total %>%
+  mutate(RACACOR = ifelse(RACACOR %in% c("Preta", "Parda"), "Negra", RACACOR))
+dados_es_total <- dados_br_total %>%
+  filter(Sigla == "ES")
+dados_ci_total <- dados_es_total %>%
+  filter(CODMUNOCOR == "320120")
+#---------- Filtrar cids na variavel CAUSABAS
+### CI PSIC
+dados_ci_psic <- dados_ci_total %>%
+  filter(str_detect(toupper(CAUSABAS), paste(codigos_psic, collapse = "|")))
+### ES PSIC
+dados_es_psic <- dados_es_total %>%
+  filter(str_detect(toupper(CAUSABAS), paste(codigos_psic, collapse = "|")))
+### BR PSIC
+dados_br_psic <- dados_br_total %>%
+  filter(str_detect(toupper(CAUSABAS), paste(codigos_psic, collapse = "|")))
+#população estimada dos municípios
+data_pop <- read_csv("populacao_municipios_ES.csv")
+```
+
+```{r include=FALSE}
+#preparação 
+dados_apreensao <- read_excel("apreensão_drogas.xlsx")
+
+# Separando a coluna em duas
+dados_apreensao <- dados_apreensao %>%
+  mutate(
+    Categoria = ifelse(str_detect(TIPO, ":"), 
+                       str_extract(TIPO, "^[^:]+"),  # Extrai a categoria antes dos dois pontos
+                       TIPO),                        # Caso não tenha o separador, repete o valor
+    Droga = ifelse(str_detect(TIPO, ":"), 
+                   str_extract(TIPO, "(?<=: ).*"),  # Extrai a droga após os dois pontos
+                   TIPO)                         # Caso não tenha o separador, repete o valor
+  )
+
+dados_ap_ci <- dados_apreensao %>%
+  filter(MUNICÍPIO == "CACHOEIRO DE ITAPEMIRIM")
+
+data_pop_ap <- data_pop %>% 
+  filter(ano %in% c(2018, 2019, 2020, 2021, 2022))
+
+```
+```{r include=FALSE}
+source("graficos_genero.R")
+source("graficos_raca.R")
+source("graficos_idade.R")
+source("menores_idade.R")
+source("exploratoria_apreensoes.R")
+```
+
+## 1. Introdução
+
+O presente relatório tem como principal objetivo descrever dados relacionados ao uso de psicoativos nas cidades pertencentes ao Programa Estado Presente, do Espírito Santo. Segundo a Secretaria de Estado de Direitos Humanos, o projeto visa à redução dos índices de criminalidade, principalmente homicídios e roubos, nas regiões de maior vulnerabilidade social. As cidades de Aracruz, Cachoeiro de Itapemirim, Cariacica, Colatina, Guarapari, Linhares, São Mateus, Serra, Vila Velha e Vitória fazem parte do Estado Presente.
+
+Para a análise, foram utilizadas duas bases de dados: a primeira, do Sistema de Informação sobre Mortalidade (SIM), que contém informações sobre óbitos de brasileiros; e a segunda, do [adicionar aqui o órgão responsável], que disponibiliza dados de apreensões de drogas.
+
+Na base do SIM, foram utilizados dados de 2013 a 2022, filtrados a partir do Código Internacional de Doenças (CID-10), considerando os casos em que algum código relacionado ao uso de psicoativos aparecia como causa básica do óbito. A lista completa dos códigos CID utilizados, bem como a descrição de cada um deles, pode ser encontrada ao final deste relatório. Além disso, também foram selecionadas variáveis sociodemográficas de interesse para a pesquisa, como o código do município onde o óbito ocorreu (CODMUNOCOR), o código do município de residência (CODMUNRES), data de nascimento (DTNASC), data do óbito (DTOBITO), raça/cor do indivíduo (RACACOR), sexo/gênero (SEXO), estado civil (ESTCIV), escolaridade (ESC), ocupação (OCUP) e local de ocorrência do óbito (LOCOCOR). Neste relatório serão discutidas as variáveis Raça, Gênero e Faixa Etária, bem como as mortes em menores de idade e as CID’s relacionadas a essas mortes. 
+
+No que diz respeito à base de dados de apreensão de drogas, os registros abrangem o período de 2018 a 2022 e incluem as seguintes variáveis: DATA DO FATO, ANO, HORA DO FATO, CÓD. SEQ., TIPO OBJETO, AÇÃO OBJETO, GRUPO DE INCIDENTE, TIPO DE INCIDENTE, UF, MUNICÍPIO, BAIRRO, LOGRADOURO, TIPO DE LOCAL, SUBTIPO DE LOCAL, EVENTO, ESPÉCIE, TIPO, MEDIDA, QUANTIDADE. Este relatório terá como foco a análise exploratória das apreensões por tipo de droga, local e período, além da distribuição das apreensões por substância e sua variação ao longo do tempo e entre os municípios.
+
+Além disso, o relatório também conta com uma análise geral dos dados, utilizando indicadores que ajudam a visualizar os impactos dos psicoativos no estado do Espírito Santo e nas cidades do estado presente. 
+
+Cabe ressaltar que, ao trabalhar com a variável idade, optou-se por unir as variáveis IDADE disponibilizada pela base de dados e a variável IDADE2 calculada pela diferença entre a data do óbito e a data de nascimento, desconsiderando os meses. E, quando divergente, optando pela variável criada.
+
+## 2. Análise geral
+
+### 2.1 Apresentação dos indicadores 
+
+Indicadores são resumos de grandes quantidades de informações, usados para resumir e facilitar a descrição e interpretação dos dados, são usados para comparar a tendência de diferentes grupos e o comportamento dos dados ao longo do tempo. Nesse relatório foram criados 8 indicadores, sendo eles:
+
+- Número de óbitos decorrentes do uso de psicoativos em Cachoeiro de Itapemirim a cada 100 óbitos de adultos;
+- Número de óbitos decorrentes do uso de psicoativo em Cachoeiro de Itapemirim, a cada 100 óbitos no estado;
+- Número de óbitos em Cachoeiro de Itapemirim a cada 100 mortes no estado;
+- Número de óbitos por psicoativos em Cachoeiro de Itapemirim em relação a população da cidade;
+- Número de óbitos por psicoativos no Espírito Santo em relação a população do estado;
+- Número de apreensões em Cachoeiro de Itapemirim a cada 100 apreensões no Espírito Santo;
+- Número de apreensões em Cachoeiro de Itapemirim a cada 100000 habitantes na cidade;
+- Número de apreensões no Espírito Santo a cada 100000 habitantes no estado.
+
+### 2.2 Análise dos indicadores para psicoativos
+
+#### 2.2.1 Indicador 1
+
+$$
+I_1 = \frac{\text{Nº de Óbitos Decorrentes do Uso de Psicoativos em Cachoeiro de Itapemirim}}{\text{Nº de Óbitos Totais de Indivíduos com mais de 18 anos em Cachoeiro de Itapemirim}} \cdot 100
+$$
+
+A partir do Gráfico 1 - Indicador 1: Número de Óbitos Decorrentes do Uso de Psicoativos na Cidade a cada 100 Óbitos de Adultos, é possível observar que houve um aumento no números de mortes relacionadas ao uso de substâncias a cada 100 Óbitos de Adultos, após isso, a tendência foi de queda ao longo dos anos, com um leve aumento em 2018 e posteriormente, uma tendência de aumento do número de  óbitos por psicoativo a  cada 1000 habitantes a partir de 2020. 
+É válido lembrar que foi a partir desse ano que a pandemia da COVID - 19 se instaurou. 
+
+```{r  echo=FALSE}
+# INDICADOR 1
+
+# Preparando os dados
+dados_indic1 <- inner_join(
+  dados_ci_psic %>%
+    group_by(ANOOBITO) %>%
+    summarise(N_obitos_ci_psic = n()),
+  dados_ci_total %>%
+    filter(IDADE2 > 17) %>%
+    group_by(ANOOBITO) %>%
+    summarise(N_obitos_ci_total = n()),
+  by = "ANOOBITO"
+)
+
+dados_indic1 <- dados_indic1 %>%
+  mutate(indic1 = (N_obitos_ci_psic / N_obitos_ci_total) * 100)
+
+# Criando o gráfico com highcharter
+highchart() %>%
+  hc_chart(type = "line") %>%
+  hc_colors(viridis(1)) %>%
+  hc_title(text = "Indicador 1") %>%
+  hc_xAxis(categories = dados_indic1$ANOOBITO, title = list(text = "Anos")) %>%
+  hc_yAxis(title = list(text = "Óbitos/100"),
+           min = 0, max = 10, tickInterval = 2) %>% 
+  hc_add_series(data = dados_indic1$indic1, 
+                name = "Indicador 1", 
+                marker = list(symbol = "circle")) %>%
+  hc_tooltip(pointFormat = "Valor: {point.y:.2f}%<br>{series.name}") %>%  # Adiciona o símbolo de porcentagem
+  hc_plotOptions(line = list(lineWidth = 0.5)) %>% 
+  hc_caption(
+    text = "Gráfico 1 - Indicador 1: Número de Óbitos Decorrentes do Uso de Psicoativos na Cidade a cada 100 Óbitos de Adultos.
+",
+    align = "center",
+    style = list(fontSize = "10px", fontWeight = "bold")
+  )
+
+
+```
+#### 2.2.2 Indicadores 2 e 3
+
+Indicador 2: 
+$$
+I_2 = \frac{\text{Nº de Óbitos Decorrentes do Uso de Psicoativos em  Cachoeiro de Itapemirim}}{\text{Nº de Óbitos Decorrentes do Uso de Psicoativos no Espírito Santo}} \cdot 100
+$$
+
+Indicador 3: 
+
+$$
+I_3 = \frac{\text{Nº de Óbitos Totais em  Cachoeiro de Itapemirim}}{\text{Nº de Óbitos Totais no Espírito Santo}}\cdot 100
+$$
+
+Através do Gráfico 2 - Indicadores 2 e 3: Número de Óbitos em Cachoeiro a cada 100 Óbitos no Espírito Santo, para Óbitos Totais e para Psicoativos, é possível verificar que a participação de Cachoeiro de Itapemirim em óbitos totais no Espírito Santo é maior que a participação de Cachoeiro de Itapemirim quando visto para os óbitos por psicoativos no Estado. Isto demonstra o impacto de Cachoeiro nos óbitos totais no Espírito Santo. Nota-se que, o indicador 3, número de óbitos totais é mais linear, ou seja, possui uma menor variabilidade ao longo dos anos, tendo seu maior e menor ponto como 9,19% e 7,23%, enquanto o indicador 2, número de óbitos decorrentes do uso de psicoativos possui um formato similar ao indicador 1, como mostrado no gráfico 1, apresentando maiores variações ao longo do tempo. 
+
+```{r echo=FALSE}
+# Preparando os dados do Indicador 2
+dados_indic2 <- inner_join(
+  dados_ci_psic %>%
+    group_by(ANOOBITO) %>%
+    summarise(N_obitos_ci_psic = n()),
+  dados_es_psic %>%
+    group_by(ANOOBITO) %>%
+    summarise(N_obitos_es_psic = n()),
+  by = "ANOOBITO"
+)
+
+dados_indic2 <- dados_indic2 %>%
+  mutate(indic2 = (N_obitos_ci_psic / N_obitos_es_psic) * 100)
+
+# Preparando os dados do Indicador 3
+dados_indic3 <- inner_join(
+  dados_ci_total %>%
+    group_by(ANOOBITO) %>%
+    summarise(N_obitos_ci_total = n()),
+  dados_es_total %>%
+    group_by(ANOOBITO) %>%
+    summarise(N_obitos_es_total = n()),
+  by = "ANOOBITO"
+)
+
+dados_indic3 <- dados_indic3 %>%
+  mutate(indic3 = (N_obitos_ci_total / N_obitos_es_total) * 100)
+
+# Combinando os dados dos Indicadores 2 e 3
+dados_indic2_3 <- data.frame(
+  Ano = rep(dados_indic2$ANOOBITO, 2),
+  valor = c(dados_indic2$indic2, dados_indic3$indic3),
+  Indicador = c(rep("Indicador 2", nrow(dados_indic2)), rep("Indicador 3", nrow(dados_indic3)))
+)
+
+# Criando o gráfico com highcharter
+highchart() %>%
+  hc_chart(type = "line") %>%
+  hc_colors(viridis(2)) %>%
+  hc_title(text = " Séries Indicadores 2 e 3") %>%
+  hc_xAxis(categories = unique(dados_indic2_3$Ano), title = list(text = "Anos")) %>%
+  hc_yAxis(title = list(text = "Óbitos/100"), min = 0, tickInterval = 0.5) %>%
+  hc_add_series(
+    data = dados_indic2_3 %>% filter(Indicador == "Indicador 2") %>% pull(valor),
+    name = "Indicador 2",
+    marker = list(symbol = "circle")
+  ) %>%
+  hc_add_series(
+    data = dados_indic2_3 %>% filter(Indicador == "Indicador 3") %>% pull(valor),
+    name = "Indicador 3",
+    marker = list(symbol = "circle")
+  ) %>%
+  hc_tooltip(pointFormat = "Percentual: {point.y:.2f}%<br>{series.name}") %>%
+  hc_plotOptions(line = list(lineWidth = 0.5)) %>%
+  hc_caption(
+    text = "Gráfico 2 - Indicadores 2 e 3: Número de Óbitos em Cachoeiro a cada 100 Óbitos no Espírito Santo, para Óbitos Totais e para Psicoativos",
+    align = "center",
+    style = list(fontSize = "10px", fontWeight = "bold")
+  )
+
+```
+
+
+#### 2.2.3 Indicadores 4 e 5 
+
+Indicador 4:
+
+$$
+I_4 = \frac{\text{Nº de Óbitos Decorrentes do Uso de Psicoativos em  Cachoeiro de Itapemirim}}{\text{População Estimada de  Cachoeiro de Itapemirim no ano correspondente}} \cdot 100000
+$$
+
+Indicador 5:
+
+$$
+I_5 = \frac{\text{Nº de Óbitos Decorrentes do Uso de Psicoativos no Espírito Santo}}{\text{População Estimada do Espírito Santo no ano correspondente}} \cdot 100000
+$$
+
+Os indicadores 4 e 5 mostram o número de óbitos por psicoativos em relação a população de Cachoeiro e do Espírito Santo. Através deles é possível compreender que enquanto no estado, o número de óbitos por psicoativos a cada 100.000 habitante variou de 13 a 18, em Cachoeiro esse número variou de 11 a aproximadamente 25 óbitos a cada 100000 habitantes, apresenta maior variabilidade, estando a maior parte do tempo acima do Espírito Santo, apresentando tendência de queda até 2020.
+
+```{r echo=FALSE}
+# INDICADORES 4 E 5
+
+dados_indic4 <- data_pop %>%
+  dplyr::filter(codigoMunicipio == 3201209) %>%
+  select(codigoMunicipio, ano, valor)
+
+#dados_indic4$ano <- as.numeric(dados_indic4$ano)
+
+dados_indic4 <- dados_indic4 %>%  inner_join(
+  data.frame(
+    dados_ci_psic %>% group_by(ANOOBITO) %>%
+      summarise(N.obitos = n())
+  ),
+  
+  by = c("ano" = "ANOOBITO")
+)
+
+
+dados_indic5 <- data_pop %>%
+  dplyr::filter(codigoMunicipio == 32) %>%
+  select(codigoMunicipio, ano, valor)
+
+#dados_indic5$ano <- as.numeric(dados_indic5$ano)
+
+dados_indic5 <- dados_indic5 %>%  inner_join(
+  data.frame(
+    dados_es_psic %>% group_by(ANOOBITO) %>%
+      summarise(N.obitos = n())
+  ),
+  
+  by = c("ano" = "ANOOBITO")
+)
+
+
+dados_indic4_5 <- data.frame(
+  Ano = rep(dados_indic4$ano, 2),
+  valor = c(dados_indic4$valor,
+            dados_indic5$valor),
+  N.obitos = c(dados_indic4$N.obitos,
+               dados_indic5$N.obitos),
+  Indicador = c(rep("Indicador 4", 10),
+                rep("Indicador 5", 10)))
+
+dados_indic4_5 <- dados_indic4_5 |> mutate(Indic = (N.obitos/valor)*100000)
+
+
+highchart() %>%
+  hc_chart(type = "line") %>%
+  hc_colors(viridis(2)) %>%
+  hc_title(text = " Séries Indicadores 4 e 5") %>%
+  hc_xAxis(categories = unique(dados_indic4_5$Ano), title = list(text = "Anos")) %>%
+  hc_yAxis(title = list(text = "Óbitos/100000"), min = 0, max = 30, tickInterval = 0.5) %>%
+  hc_add_series(
+    data = dados_indic4_5 %>% filter(Indicador == "Indicador 4") %>% pull(Indic),
+    name = "Indicador 4",
+    marker = list(symbol = "circle")
+  ) %>%
+  hc_add_series(
+    data = dados_indic4_5 %>% filter(Indicador == "Indicador 5") %>% pull(Indic),
+    name = "Indicador 5",
+    marker = list(symbol = "circle")
+  ) %>%
+  hc_tooltip(pointFormat = "Valor: {point.y:.2f}<br>{series.name}") %>%
+  hc_plotOptions(line = list(lineWidth = 0.5)) %>%
+  hc_caption(
+    text = "Gráfico 3 - Indicadores 4 e 5: Número de Óbitos por Psicoativos a cada 100000 Habitantes, para a Cachoeiro e Espírito Santo",
+    align = "center",
+    style = list(fontSize = "10px", fontWeight = "bold")
+  )
+
+
+```
+
+
+### 2.3 Análise dos indicadores(ajustados) para apreensões
+
+#### 2.3.1 Indicador 6 
+
+Indicador 6:
+
+$$
+I_6 = \frac{\text{Nº de Apreensões em  Cachoeiro de Itapemirim}}{\text{Nº de Apreensões no Espírito Santo}}\cdot 100
+$$
+
+Pelo indicador 6, apresentado no Gráfico 4 - Indicador 6: Número de Apreensões em Cachoeiro de Itapemirim a cada 100 Apreensões no Espírito Santo, O número de apreensões em Cachoeiro de Itapemirim, em relação com as apreensões no Espírito Santo ao longo dos anos é aproximadamente constante, sem grande variabilidade, ficando em torno de 3,33% e 4,08%. 
+
+
+```{r echo=FALSE}
+
+dados_indic6 <- inner_join(
+  dados_ap_ci %>%
+    group_by(ANO) %>%
+    summarise(N.apreensoes_vix = n()),
+  dados_apreensao %>%
+    group_by(ANO) %>%
+    summarise(N.apreensoes_es = n()),
+  by = "ANO"
+)
+
+dados_indic6 <- dados_indic6 %>%
+  mutate(indic6 = (N.apreensoes_vix / N.apreensoes_es) * 100)
+
+
+highchart() %>%
+  hc_chart(type = "line") %>%
+  hc_colors(viridis(1)) %>%
+  hc_title(text = "Série do Indicador 6") %>%
+  hc_xAxis(categories = dados_indic6$ANO, title = list(text = "Anos")) %>%
+  hc_yAxis(title = list(text = "Apreensões/100"),
+           min = 0, max = 20, tickInterval =2) %>%
+  hc_add_series(data = dados_indic6$indic6, 
+                name = "Indicador 6", 
+                marker = list(symbol = "circle")) %>%
+  hc_tooltip(pointFormat = "Percentual: {point.y:.2f}%<br>{series.name}") %>%
+  hc_plotOptions(line = list(lineWidth = 0.5))%>%
+  hc_caption(
+    text = "Gráfico 4 - Indicador 6: Número de Apreensões em Cachoeiro de Itapemirim a cada 100 Apreensões no Espírito Santo",
+    align = "center",
+    style = list(fontSize = "10px", fontWeight = "bold")
+  )
+
+```
+
+#### 2.3.2 Indicadores 7 e 8
+
+Indicador 7:
+$$
+I_7 = \frac{\text{Nº de Apreensões em  Cachoeiro de Itapemirim}}{\text{População Estimada de  Cachoeiro de Itapemirim no ano correspondente}} \cdot 100000
+$$
+
+Indicador 8: 
+
+$$
+I_8 = \frac{\text{Nº de Apreensões no Espírito Santo}}{\text{População Estimada do Espírito Santo no ano correspondente}} \cdot 100000
+$$
+
+Como apresentado no Gráfico 5 - Indicadores 7 e 8: Número de Apreensões para cada 100000 Habitantes, para Cachoeiro e Espírito Santo, os indicadores 7 e 8 apresentam uma baixa variabilidade e uma mesma tendência de aumento ao longo dos anos. 
+
+Pode-se notar que, apesar da mesma tendência, o número de apreensões no Espírito Santo a cada 100000 habitantes é maior do que o número de apreensões em Cachoeiro de Itapemirim a cada 100000 habitantes. 
+
+
+```{r echo=FALSE}
+# INDICADORES 7 E 8
+
+dados_indic7 <- data_pop_ap %>%
+  dplyr::filter(codigoMunicipio == 3201209) %>%
+  select(codigoMunicipio, ano, valor)
+
+#dados_indic7$ano <- as.numeric(dados_indic7$ano)
+
+dados_indic7 <- dados_indic7 %>%  inner_join(
+  data.frame(
+    dados_ap_ci %>% group_by(ANO) %>%
+      summarise(N.apreensoes = n())
+  ),
+  
+  by = c("ano" = "ANO")
+)
+
+
+dados_indic8 <- data_pop_ap %>%
+  dplyr::filter(codigoMunicipio == 32) %>%
+  select(codigoMunicipio, ano, valor)
+
+#dados_indic8$ano <- as.numeric(dados_indic8$ano)
+
+dados_indic8 <- dados_indic8 %>%  inner_join(
+  data.frame(
+    dados_apreensao %>% group_by(ANO) %>%
+      summarise(N.apreensoes = n())
+  ),
+  
+  by = c("ano" = "ANO")
+)
+
+
+dados_indic7_8 <- data.frame(
+  Ano = rep(dados_indic7$ano, 2),
+  valor = c(dados_indic7$valor,
+            dados_indic8$valor),
+  N.apreensoes = c(dados_indic7$N.apreensoes,
+               dados_indic8$N.apreensoes),
+  Indicador = c(rep("Indicador 7", 5),
+                rep("Indicador 8", 5)))
+
+dados_indic7_8 <- dados_indic7_8 |> mutate(Indic = (N.apreensoes/valor)*100000)
+
+
+highchart() %>%
+  hc_chart(type = "line") %>%
+  hc_colors(viridis(2)) %>%
+  hc_title(text = " Séries Indicadores 7 e 8") %>%
+  hc_xAxis(categories = unique(dados_indic7_8$Ano), title = list(text = "Anos")) %>%
+  hc_yAxis(title = list(text = "Apreensões/100000"), min = 0, max = 1000, tickInterval = 100) %>%
+  hc_add_series(
+    data = dados_indic7_8 %>% filter(Indicador == "Indicador 7") %>% pull(Indic),
+    name = "Indicador 7",
+    marker = list(symbol = "circle")
+  ) %>%
+  hc_add_series(
+    data = dados_indic7_8 %>% filter(Indicador == "Indicador 8") %>% pull(Indic),
+    name = "Indicador 8",
+    marker = list(symbol = "circle")
+  ) %>%
+  hc_tooltip(pointFormat = "Valor: {point.y:.2f}<br>{series.name}") %>%
+  hc_plotOptions(line = list(lineWidth = 0.5))%>%
+  hc_caption(
+    text = "Gráfico 5 - Indicadores 7 e 8: Número de Apreensões para cada 100000 Habitantes, para Cachoeiro e Espírito Santo",
+    align = "center",
+    style = list(fontSize = "10px", fontWeight = "bold")
+  )
+
+```
+
+
+## 3. Análise exploratória 
+
+### 3.1 Psicoativos
+
+Para as variáveis sociodemográficas, foram realizadas análises considerando 4 panoramas:
+
+- Espírito Santo total;
+- Cachoeiro de Itapemirim Total; 
+- Espírito Santo Psicoativo;
+- Cachoeiro de Itapemirim Psicoativo;
+
+Os gráficos apresentados a seguir foram obtidos a partir de dados relativos, ou seja, a quantidade de óbitos em relação à respectiva população do lugar. 
+
+#### 3.1.1 Raça
+
+Levando em consideração a população brasileira e as questões sociais que envolvem o entendimento de raça, este trabalho optou por reunir a população Parda e Preta em uma população Negra.
+
+Os gráficos 6 e 7 da taxa de mortes por Raça/Cor no Espírito Santo e em Cachoeiro de Itapemirim, mostrou que, em Cachoeiro ocorreram mais mortes do que no estado, em relação aos habitantes. 
+
+No Espírito Santo, morreram mais pessoas negras que pessoas brancas, indígenas e amarelas, enquanto em Cachoeiro, apesar do grande número de informações faltantes, nota-se que ocorre o contrário do que acontece no estado, brancos morrem mais que negras, indígenas e amarelas. Observa-se também que o número de mortes para cada categoria apresentadas em cada gráfico, seguem uma mesma tendência, tanto no Estado, quanto na cidade. 
+
+Ao observar os gráficos de mortes por psicoativos, gráficos 8 e 9, é notório que o número de Negros foi superior ao número de Brancos no Estado, havendo uma discrepância maior que a observada nos gráficos 6 e 7. 
+No Gráfico 9, é possível observar a taxa de mortes causadas pelo uso de psicoativos em Cachoeiro, e nota-se que, diferente dos gráficos 6,7 e 8, esse não apresenta uma tendência clara, as mortes tiveram quantidades com grande variações ao longo do tempo e as quantidades de mortes de brancos e negros similares. Um ponto interessante é que em 2020 onde a taxa do número de mortes de brancos teve seu ponto mais baixo, que se diferenciou dos outros anos, com 1.42 mortos a cada 100000 habitantes. 
+
+```{r echo=FALSE}
+#Códigos
+#DADOS TOTAL
+graf_r_1
+
+```
+
+```{r echo=FALSE}
+graf_r_2
+```
+
+
+#### 3.1.2 Gênero
+
+Os gráficos 10 e 11 da taxa de mortes por Gênero no Espírito Santo e em Cachoeiro de Itapemirim, mostrou que, em ambos os panoramas, homens morreram mais que mulheres, porém as taxas de mortes em Cachoeiro são mais elevadas que no Espírito Santo. 
+
+No Espírito Santo, observa-se também que o número de mortes para as categorias apresentadas em cada gráfico, seguem uma mesma tendência, tanto no Estado, quanto na cidade. Apesar de a tendência dentro de cada gráfico ser semelhante, quando comparados entre os gráficos, nota-se que após 2020, no estado houve um aumento mais elevado que dos anos anteriores, que após 2021 voltou ao “normal”, já em Cachoeiro, a taxa de mortes aumentou em 2020 e seguiu alta até 2022. 
+
+Ao observar os gráficos de mortes por psicoativos, gráficos 12 e 13, é notório que o número de óbitos de homens foi superior ao número de mulheres no Espírito Santo e em Cachoeiro de Itapemirim, com uma discrepância maior que a observada nos gráficos 10 e 11. No Gráfico 13, é possível observar a taxa de mortes causadas pelo uso de psicoativos em Cachoeiro, e nota-se que, diferente dos gráficos 10,11 e 12, esse tem um variabilidade maior ao longo dos anos, principalmente da taxa de morte de homens, com a menor  taxa sendo 9.97 e maior 32.00 homens a cada 100000 habitantes, sendo essa taxa maior que todas causadas por psicoativos. 
+
+
+```{r echo=FALSE}
+grafico_g_1
+```
+
+
+```{r echo=FALSE}
+grafico_g_2
+```
+
+
+#### 3.1.3 Faixa Etária
+
+Para os gráficos de séries, será usada essa categorização:
+
+**Menor de idade** - entre 0 e 17 anos \
+**Jovem-Adulto** - entre 18 e 30 anos \
+**Adulto** - entre 31 e 55 anos \
+**Idoso** - acima de 55 anos \
+
+
+Os gráficos 14 e 15 da taxa de mortes por Faixa-Etária no Espírito Santo e em Cachoeiro de Itapemirim, mostrou que, em ambos os panoramas, idoso foi o que teve maior número de mortes, porém as taxas de mortes em Cachoeiro são mais elevadas que no Espírito Santo. 
+
+Apesar de a tendência dentro de cada gráfico ser semelhante, quando comparados entre os gráficos, nota-se que, assim como acontecia para gênero, após 2020, no estado houve um aumento mais elevado que dos anos anteriores e que após 2021 voltou ao “normal”, já em Cachoeiro, a taxa de mortes aumentou em 2020 e seguiu alta até 2022. 
+
+Ao observar os gráficos de mortes por psicoativos, gráficos 16 e 17, é notório que o número de óbitos de adultos e idosos foram superiores ao número óbitos de Jovens-Adultos e Menores de idade no Espírito Santo e em Cachoeiro de Itapemirim, com uma discrepância maior que a observada nos gráficos 14 e 15. No Gráfico 17, é possível observar a taxa de mortes causadas pelo uso de psicoativos em Cachoeiro, e nota-se que, diferente dos gráficos 14,15 e 16, esse tem um variabilidade maior ao longo dos anos, principalmente da taxa de morte de adulto, com a menor  taxa sendo 3.35 e maior 13.53 adultos a cada 100000 habitantes, sendo essa taxa maior que todas causadas por psicoativos.
+
+Observa-se também a falta de tendência nos gráficos de mortes causadas pelo uso de psicoativos (gráficos 16 e 17) em relação com as tendências presentes nos gráficos de mortes gerais ( gráficos 14 e 15). 
+
+```{r echo=FALSE}
+graf_i_1
+```
+
+```{r echo=FALSE}
+graf_i_2
+```
+
+
+##### 3.1.3.1 Morte menores de idade
+
+Para os gráficos de séries, será usada essa categorização:
+
+**Bebê** - entre 0 e 2 anos\
+**Criança** - entre 3 e 8 anos\
+**Pré-Adolescente** - entre 9 e 12 anos\
+**Adolescente** - entre 13 e 17 anos\
+
+Os gráficos 18 e 19 da taxa de mortes de menores de idade por Faixa-Etária no Espírito Santo e em Cachoeiro de Itapemirim, mostrou que, em ambos os panoramas, Bebê foi o que teve maior número de mortes, ou seja, mortes de bebês e recém-nascidos, porém as taxas de mortes em Cachoeiro são mais elevadas que no Espírito Santo. 
+
+No gráfico do Espírito Santo (gráfico 18), nota-se a baixa variabilidade das taxas ao longo dos anos, enquanto em Cachoeiro (gráfico 19), essa variabilidade é elevada e não apresenta uma tendência clara. 
+
+Ao observar os gráficos de mortes por psicoativos, gráficos 20 e 21, é possível observar que houve poucas mortes de menores de idade. No Espírito Santo, (gráfico 20) todas as taxas estão abaixo de 0.2, ou seja, menos de 0.2 bebês para cada 100000 habitantes. Em Cachoeiro de Itapemirim, houve apenas uma morte de menor de idade, que pode ser observada com mais precisão na tabela de caso específico, onde informa que, essa morte foi de um menino de 16 anos por Auto Intoxicação por e exposição, intencional, a outras drogas, medicamentos e substâncias biológicas e às não especificadas na residência. 
+
+
+```{r echo=FALSE}
+graf_mi_1
+
+#graf_mi_cid
+
+```
+```{r echo=FALSE}
+
+graf_mi_2
+#graf_mi_cid
+
+```
+
+
+```{r echo=FALSE}
+# Criando a tabela manualmente
+tabela_relatorio <- data.frame(
+  CAUSA = "X640",
+  SEXO = "Masculino",
+  IDADE = 16,
+  ANO = 2021,
+  DESCRIÇÃO = "Auto intoxicação por e exposição, intencional, a outras drogas, medicamentos e substâncias biológicas e às não especificadas na residência"
+)
+
+# Exibir a tabela no relatório
+kable(tabela_relatorio, caption = "Tabela de Caso Específico")
+```
+
+
+
+### 3.2 Apreensões
+
+#### 3.2.1 Número de apreensões e tipo de droga
+
+Analisando os gráficos de apreensões de drogas em Cachoeiro de Itapemirim, pode-se retirar algumas informações importantes. No gráfico 22 - número de apreensões de drogas de 2018 a 2022 em Cachoeiro de Itapemirim, é possível perceber que há uma similaridade no formato das linhas, nota-se que maconha é a droga mais apreendida ao longo dos anos, enquanto cocaína e crack tem uma quantidade similar de apreensões.  Além disso, em preto, podemos ver o número total de apreensões. É notório o crescimento no número de ocorrências ao longo dos anos.
+
+Quando se olha-se os tipos de crimes mais comuns envolvendo drogas, no gráfico 23, temos que, um crime se sobressai em relação aos outros, tendo um número de ocorrências muito maior que os demais, sendo ele Crimes de tóxico: Tráfico de Entorpecentes, seguido pelo Crimes de tóxico: apreensão de Entorpecentes, que é consideravelmente mais comum que os demais. 
+
+Uma apresentação mais completa das quantidades de drogas apreendidas, pode ser visto no gráfico 24 - quantidade de apreensões por droga de 2018 a 2022, onde observa-se, outras drogas, que não aparecem no gráfico 22 - número de apreensões de drogas de 2018 a 2022, além da soma do número de apreensões durante os anos. 
+
+```{r echo=FALSE}
+serie_drogas_ci
+```
+
+```{r echo=FALSE}
+bar_incidentes_ci
+```
+
+```{r echo=FALSE}
+bar_droga_pred_ci
+```
+
+#### 3.2.2 Número de apreensões e locais onde ocorrem
+
+Um estudo sobre onde se passam essas apreensões é importante para compreender tendências e padrões. Essa parte foca nos locais onde essas apreensões aconteceram, seja cidade, bairro ou tipo de local. A partir do gráfico 25 - Locais onde mais aconteceram apreensões de drogas de 2018 a 2022, é possível perceber que a enorme maioria das apreensões foi realizada em via pública (2 733 apreensões), seguida por residência (668 apreensões). O número de apreensões nesses locais também aumentou com o decorrer do tempo, como pode ser observado pelo gráfico 26 - Locais com Maior número de Apreensões de Drogas de 2018 a 2022 em Cachoeiro de Itapemirim. 
+ 
+Os gráficos 27 e 28 (15 Bairros de Cachoeiro de Itapemirim com Maior número de apreensões e Porcentagem, (%) de Ocorrências de Apreensão por bairro de Cachoeiro de Itapemirim) trazem uma análise sobre os bairros da cidade. Com Zumbi sendo o bairro com maior número de apreensões (280), seguido pelo bairro Doutor Gilson Carone (259), o gráfico 28 traz uma análise mais detalhada sobre as drogas apreendidas nos 5 bairros com maior número de apreensões. 
+
+```{r echo=FALSE}
+bar_local_prod_ci
+```
+
+```{r echo=FALSE}
+
+series_local_pred_ci
+```
+
+```{r echo=FALSE}
+bairro_pred_ci
+
+```
+
+```{r echo=FALSE}
+
+prop_droga_bairro_ci
+```
+
+#### 3.2.3 Análise temporal das apreensões
+
+Ao realizar análises temporais, como apresentadas no gráfico 29 - Número de Ocorrências por hora do dia em Cachoeiro de Itapemirim, gráfico 30 - Número de ocorrências por mês em Cada Ano em Cachoeiro de Itapemirim, gráfico 31 -  Número Total de ocorrências por Mês em Cada Ano em Cachoeiro de Itapemirim e gráfico 31 - Número Total de ocorrências por Dia da Semana em Cachoeiro de Itapemirim percebe-se que as apreensões ocorrem em maior quantidade no período noturno, a partir das 17h, e tem seu pico às 20h, reduzindo a quantidade após as 21h. 
+
+Ao longo do ano, não existe um padrão nas apreensões, elas ocorrem em todos os meses, como mostrado no gráfico 30. Durante os anos de 2018 e 2022, as apreensões ao longo dos meses seguiram sem grandes variações, tendo seu maior número em agosto (412 apreensões), como mostrado no gráfico 31. Ao longo da semana, existe um padrão de apreensões, onde a tendência é aumentar o número de apreensões ao longo da semana, tendo seu pico na sexta-feira e no sábado apresentando uma grande redução. 
+
+É uma questão interessante de ser analisada no quesito qualitativo para ver se encontra motivo para esse comportamento, que ocorre tanto em Cachoeiro de Itapemirim, quanto no Espírito Santo, como apresentado no relatório Apreensão de Drogas no ES por Tipo de Droga, Local e Tempo.
+
+```{r echo=FALSE}
+hora_apre_ci
+```
+
+```{r echo=FALSE}
+series_apre_mes_ci
+```
+
+```{r echo=FALSE}
+
+bar_apre_mes_ci
+```
+
+```{r echo=FALSE}
+bar_apre_dia_ci
+```
+
+
+## 4. Conclusões
+
+Ao analisar o que foi apresentado neste relatório, foi possível entender que, a cerca de  Cachoeiro de Itapemirim, os indicadores construídos demonstraram que, embora o município tenha uma participação relevante nos óbitos totais do Espírito Santo, a proporção de mortes específicas por psicoativos em relação ao estado varia mais ao longo do tempo.
+
+Os dados indicam que, entre 2013 e 2022, houve uma oscilação na taxa de óbitos por psicoativos, com um declínio até 2020, seguido de um novo aumento, possivelmente influenciado pela pandemia da COVID-19. Além disso, a análise sociodemográfica revela discrepâncias importantes entre raça/cor, gênero e faixa etária, mostrando que pessoas negras, homens e adultos são os mais afetados pelos óbitos relacionados ao uso de psicoativos. Observa-se também que apesar de um alto número de mortes de menores de idade em Cachoeiro, apenas uma foi óbito devido ao uso de psicoativos, o que é um bom parâmetro quando comparado ao número de óbitos de menores no Estado. 
+
+No que diz respeito às apreensões de drogas, pode-se concluir uma tendência crescente ao longo dos anos, com maconha sendo a substância mais apreendida. As ocorrências se concentram principalmente em vias públicas e residências, com destaque para os bairros Zumbi e Doutor Gilson Carone. Além disso, observou-se que as apreensões ocorrem mais frequentemente no período noturno, atingindo seu pico às 20h, e que há um aumento gradual ao longo da semana, com maior incidência às sextas-feiras.
+
+
+## 5. Apêndice 
+
+```{r echo=FALSE}
+
+CIDS <- read_excel("CIDS2.xlsx")
+tabela_redutiva <- reactable::reactable(CIDS,
+                                        groupBy = c("CID", "Subdivisão"),
+                                        filterable = TRUE,
+                                        showSortable = TRUE,
+                                        searchable = TRUE,
+                                        showPageSizeOptions = TRUE,
+                                        pageSizeOptions = c(10, 15, 27),
+                                        defaultPageSize = 27,
+                                        striped = TRUE,
+                                        highlight = TRUE,
+                                        theme = reactable::reactableTheme(
+                                          color = "#000000",
+                                          borderColor = "#dfe2e5",
+                                          stripedColor = "#f6f8fa",
+                                          highlightColor = "#f0f5f9",
+                                          cellPadding = "8px 12px",
+                                          style = list(fontFamily = "-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif"),
+                                          searchInputStyle = list(width = "100%")
+                                        ))
+
+tabela_redutiva
+```
+
